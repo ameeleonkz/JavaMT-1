@@ -162,8 +162,8 @@ public class Main {
     private static void performanceAnalysis() {
         System.out.println("=== АНАЛИЗ ПРОИЗВОДИТЕЛЬНОСТИ ===");
         
-        // Уменьшаем количество задач для более точного измерения
-        int[] taskCounts = {50, 200, 500};
+        // Задаем количество задач
+        int[] taskCounts = {70};
         
         for (int taskCount : taskCounts) {
             System.out.println("\n=== Тест с " + taskCount + " задачами ===");
@@ -171,7 +171,7 @@ public class Main {
             int queueSize = Math.max(50, taskCount / 2); // Меньший размер очереди для реалистичности
             
             PoolConfig[] configs = {
-                new PoolConfig("Custom ThreadPool", () -> {
+                new PoolConfig("Custom ThreadPool 4-8size 60sec 2spare", () -> {
                     ThreadPoolConfig config = new ThreadPoolConfig.Builder()
                         .corePoolSize(4)
                         .maxPoolSize(8)
@@ -179,6 +179,45 @@ public class Main {
                         .timeUnit(TimeUnit.SECONDS)
                         .queueSize(queueSize)
                         .minSpareThreads(2)
+                        .rejectedExecutionHandler(new AdaptiveRejectedExecutionHandler())
+                        .build();
+                    CustomThreadPool customPool = new CustomThreadPool(config);
+                    return new CustomThreadPoolAdapter(customPool);
+                }),
+                new PoolConfig("Custom ThreadPool 4-8size 30sec 2spare", () -> {
+                    ThreadPoolConfig config = new ThreadPoolConfig.Builder()
+                        .corePoolSize(4)
+                        .maxPoolSize(8)
+                        .keepAliveTime(30)
+                        .timeUnit(TimeUnit.SECONDS)
+                        .queueSize(queueSize)
+                        .minSpareThreads(2)
+                        .rejectedExecutionHandler(new AdaptiveRejectedExecutionHandler())
+                        .build();
+                    CustomThreadPool customPool = new CustomThreadPool(config);
+                    return new CustomThreadPoolAdapter(customPool);
+                }),
+                new PoolConfig("Custom ThreadPool 2-4size 60sec 2spare", () -> {
+                    ThreadPoolConfig config = new ThreadPoolConfig.Builder()
+                        .corePoolSize(2)
+                        .maxPoolSize(4)
+                        .keepAliveTime(60)
+                        .timeUnit(TimeUnit.SECONDS)
+                        .queueSize(queueSize)
+                        .minSpareThreads(2)
+                        .rejectedExecutionHandler(new AdaptiveRejectedExecutionHandler())
+                        .build();
+                    CustomThreadPool customPool = new CustomThreadPool(config);
+                    return new CustomThreadPoolAdapter(customPool);
+                }),
+                new PoolConfig("Custom ThreadPool 4-8size 60sec 4spare", () -> {
+                    ThreadPoolConfig config = new ThreadPoolConfig.Builder()
+                        .corePoolSize(4)
+                        .maxPoolSize(8)
+                        .keepAliveTime(60)
+                        .timeUnit(TimeUnit.SECONDS)
+                        .queueSize(queueSize)
+                        .minSpareThreads(4)
                         .rejectedExecutionHandler(new AdaptiveRejectedExecutionHandler())
                         .build();
                     CustomThreadPool customPool = new CustomThreadPool(config);
@@ -357,22 +396,24 @@ public class Main {
         CountDownLatch latch = new CountDownLatch(taskCount);
         AtomicInteger rejectedTasks = new AtomicInteger(0);
         AtomicInteger completedTasks = new AtomicInteger(0);
+        AtomicLong firstTaskStart = new AtomicLong(0);
+        AtomicLong lastTaskEnd = new AtomicLong(0);
         
         // Измерение памяти до
         Runtime runtime = Runtime.getRuntime();
         runtime.gc();
-        Thread.yield(); // Даем время GC
+        Thread.yield();
         long memBefore = runtime.totalMemory() - runtime.freeMemory();
         
-        // Разогрев - более реалистичный
-        int warmupTasks = Math.min(20, taskCount / 20);
+        // Разогрев - НЕ ВКЛЮЧАЕМ в измерения
+        int warmupTasks = Math.min(10, taskCount / 10);
         CountDownLatch warmupLatch = new CountDownLatch(warmupTasks);
         
         for (int i = 0; i < warmupTasks; i++) {
             try {
                 executor.execute(() -> {
                     try {
-                        Thread.sleep(10); // Короткая задача для разогрева
+                        Thread.sleep(5);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                     } finally {
@@ -385,26 +426,23 @@ public class Main {
         }
         
         try {
-            warmupLatch.await(5, TimeUnit.SECONDS);
+            warmupLatch.await(10, TimeUnit.SECONDS);
+            Thread.sleep(100); // Пауза после разогрева
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
         
-        // Пауза между разогревом и тестом
-        try {
-            Thread.sleep(100);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        
-        // Основной тест - более точное измерение
-        long realStartTime = System.nanoTime();
+        // ОСНОВНОЙ ТЕСТ - точное измерение времени выполнения задач
+        long testStartTime = System.nanoTime();
         
         for (int i = 0; i < taskCount; i++) {
             final int taskId = i;
             try {
                 executor.execute(() -> {
                     long taskStartTime = System.nanoTime();
+                    
+                    // Записываем время первой задачи
+                    firstTaskStart.compareAndSet(0, taskStartTime);
                     
                     try {
                         // Выполняем рабочую нагрузку
@@ -413,14 +451,12 @@ public class Main {
                         }
                         
                         if (workload.cpuMs > 0) {
-                            // Более точная имитация CPU работы
                             long cpuEnd = System.nanoTime() + (workload.cpuMs * 1_000_000L);
                             double dummy = 0;
                             while (System.nanoTime() < cpuEnd) {
                                 dummy += Math.sqrt(Math.random() * 1000);
                             }
-                            // Используем результат чтобы избежать оптимизации
-                            if (dummy < 0) System.out.print("");
+                            if (dummy < 0) System.out.print(""); // Избегаем оптимизации
                         }
                         
                         completedTasks.incrementAndGet();
@@ -432,6 +468,9 @@ public class Main {
                     } finally {
                         long taskEndTime = System.nanoTime();
                         totalTime.addAndGet((taskEndTime - taskStartTime) / 1_000_000);
+                        
+                        // Записываем время последней задачи
+                        lastTaskEnd.set(taskEndTime);
                         latch.countDown();
                     }
                 });
@@ -441,25 +480,20 @@ public class Main {
             }
         }
         
+        long submissionEndTime = System.nanoTime();
+        
         // Ждем завершения всех задач
         boolean finished = false;
         try {
-            finished = latch.await(120, TimeUnit.SECONDS); // Больше времени
+            finished = latch.await(120, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
         
-        long realEndTime = System.nanoTime();
+        long testEndTime = System.nanoTime();
         
         if (!finished) {
             System.err.println("[WARNING] " + poolConfig.name + " - не все задачи завершились вовремя");
-        }
-        
-        // Принудительно ждем завершения
-        try {
-            Thread.sleep(100);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         }
         
         // Измерение памяти после
@@ -478,20 +512,107 @@ public class Main {
             Thread.currentThread().interrupt();
         }
         
-        // Расчет метрик
-        double realTotalTimeMs = (realEndTime - realStartTime) / 1_000_000.0;
+        // ПРАВИЛЬНЫЙ расчет метрик
         int actualCompleted = completedTasks.get();
+        
+        // Вариант 1: Throughput на основе времени от первой до последней задачи
+        double executionTimeMs = 0;
+        if (firstTaskStart.get() > 0 && lastTaskEnd.get() > 0) {
+            executionTimeMs = (lastTaskEnd.get() - firstTaskStart.get()) / 1_000_000.0;
+        } else {
+            executionTimeMs = (testEndTime - testStartTime) / 1_000_000.0;
+        }
+        
+        // Вариант 2: Throughput на основе общего времени теста (более консервативный)
+        double totalTestTimeMs = (testEndTime - testStartTime) / 1_000_000.0;
+        
+        // Вариант 3: Throughput на основе времени отправки задач
+        double submissionTimeMs = (submissionEndTime - testStartTime) / 1_000_000.0;
+        
         double avgTaskTime = actualCompleted > 0 ? totalTime.get() / (double) actualCompleted : 0;
-        double throughput = actualCompleted / (realTotalTimeMs / 1000.0);
+        
+        // Используем наиболее корректный способ расчета throughput
+        double throughputByExecution = actualCompleted / (executionTimeMs / 1000.0);
+        double throughputByTotal = actualCompleted / (totalTestTimeMs / 1000.0);
+        
+        // Выбираем более консервативную оценку
+        double throughput = Math.min(throughputByExecution, throughputByTotal);
+        
         double memoryMB = Math.max(0, (memAfter - memBefore) / (1024.0 * 1024.0));
         
-        // Детальная отчетность
+        // Детальная отчетность для отладки
         if (rejectedTasks.get() > 0 || actualCompleted != taskCount) {
-            System.out.printf("    [%s] Статистика: отправлено=%d, выполнено=%d, отклонено=%d, время=%.1fмс%n", 
-                poolConfig.name, taskCount, actualCompleted, rejectedTasks.get(), realTotalTimeMs);
+            System.out.printf("    [%s] Статистика: отправлено=%d, выполнено=%d, отклонено=%d%n", 
+                poolConfig.name, taskCount, actualCompleted, rejectedTasks.get());
+            System.out.printf("    [%s] Времена: выполнение=%.1fмс, общее=%.1fмс, отправка=%.1fмс%n",
+                poolConfig.name, executionTimeMs, totalTestTimeMs, submissionTimeMs);
+            System.out.printf("    [%s] Throughput: по выполнению=%.1f, по общему=%.1f%n",
+                poolConfig.name, throughputByExecution, throughputByTotal);
         }
         
         return new BenchmarkResult(avgTaskTime, throughput, memoryMB);
+    }
+
+    private static BenchmarkResult simpleAccurateBenchmark(PoolConfig poolConfig, WorkloadType workload, int taskCount) {
+        ExecutorService executor = poolConfig.factory.get();
+        CountDownLatch latch = new CountDownLatch(taskCount);
+        AtomicInteger completed = new AtomicInteger(0);
+        AtomicInteger rejected = new AtomicInteger(0);
+        
+        // Простое измерение: от отправки первой задачи до завершения последней
+        long startTime = System.currentTimeMillis();
+        
+        for (int i = 0; i < taskCount; i++) {
+            try {
+                executor.execute(() -> {
+                    try {
+                        // Рабочая нагрузка
+                        if (workload.sleepMs > 0) {
+                            Thread.sleep(workload.sleepMs);
+                        }
+                        if (workload.cpuMs > 0) {
+                            long end = System.currentTimeMillis() + workload.cpuMs;
+                            while (System.currentTimeMillis() < end) {
+                                Math.sqrt(Math.random());
+                            }
+                        }
+                        completed.incrementAndGet();
+                    } catch (Exception e) {
+                        // ignore
+                    } finally {
+                        latch.countDown();
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                rejected.incrementAndGet();
+                latch.countDown();
+            }
+        }
+        
+        try {
+            latch.await(60, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        
+        long endTime = System.currentTimeMillis();
+        double totalTimeSeconds = (endTime - startTime) / 1000.0;
+        
+        executor.shutdown();
+        try {
+            executor.awaitTermination(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        
+        int actualCompleted = completed.get();
+        double throughput = actualCompleted / totalTimeSeconds;
+        double avgTime = (workload.sleepMs + workload.cpuMs); // Ожидаемое время задачи
+        
+        System.out.printf("    [%s] Простой расчет: %d/%d задач за %.2fс = %.1f tasks/sec%n",
+            poolConfig.name, actualCompleted, taskCount, totalTimeSeconds, throughput);
+        
+        return new BenchmarkResult(avgTime, throughput, 0);
     }
 
     private static Runnable createTask(String name, int durationMs) {
